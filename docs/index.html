@@ -259,7 +259,7 @@ input[type=range]:disabled{cursor:default;opacity:.45}
     <ol id="queueItems"></ol>
    </section>
   </div>
-  <div class="underbar"><span>SONGS ARE SAVED IN THIS BROWSER · NOTHING IS UPLOADED</span><p class="notice" id="notice" role="status"></p></div>
+  <div class="underbar"><span>TOWN HALL MIX IS BUILT IN · SONGS YOU ADD STAY IN THIS BROWSER</span><p class="notice" id="notice" role="status"></p></div>
   <div class="now"><span class="dot" aria-hidden="true"></span><span class="meta" id="nowLabel">On standby</span><span class="now-title" id="nowTitle">Service Desk Radio</span><button class="icon-btn" id="presentPlay" type="button" title="Play (Space)" aria-label="Play" disabled><svg class="ico" aria-hidden="true"><use href="#i-play"/></svg></button></div>
  </footer>
  <div class="dropmask" aria-hidden="true"><div><strong>Drop your MP3s here</strong><span>Service Desk Radio · Local playback only</span></div></div>
@@ -328,7 +328,8 @@ input[type=range]:disabled{cursor:default;opacity:.45}
  }
  function openQueue(value,focus=false){$('queue').hidden=!value;$('queueBtn').setAttribute('aria-expanded',String(value));if(focus)(value?$('closeQueue'):$('queueBtn')).focus();}
  function chooseFiles(){fileInput.click();}
- /* ---- Hosted copy: songs are remembered in this browser, so the playlist is still here next time. ---- */
+ /* ---- Hosted copy: built-in songs come with the page; songs you add are remembered in this browser. ---- */
+ const BUILT_IN=[{"src":"songs/another-great-day-in-e-t-i-country.mp3","title":"Another Great Day in E-T-I (Country)","size":8352871},{"src":"songs/another-great-day-in-e-t-i-rap.mp3","title":"Another Great Day in E-T-I (Rap)","size":6920565}];
  const SONGS='songs', PREFS='service-desk-radio:prefs';
  let dbOpen=null, storageWarned=false;
  function db(){
@@ -352,32 +353,47 @@ input[type=range]:disabled{cursor:default;opacity:.45}
   // The song's bytes are stored, not a pointer to the file, so it still plays if the file is later moved or renamed.
   songStore('readwrite',s=>s.put({key:t.key,title:t.title,type,data,added:Date.now()}))
    .then(()=>{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});})
-   .catch(()=>{if(!storageWarned){storageWarned=true;tell('This browser will not keep the songs after the tab closes.');}});
+   .catch(()=>{if(!storageWarned){storageWarned=true;tell('This browser will not keep the songs you add after the tab closes.');}});
  }
  function forgetSong(t){songStore('readwrite',s=>s.delete(t.key)).catch(()=>{});}
+ function builtInTrack(b){
+  // Starts out streaming from the site. Once the whole file has arrived it plays from memory instead,
+  // so a network hiccup in the middle of the meeting cannot stall a song change.
+  const t={key:'built-in:'+b.src,title:b.title,src:b.src,held:'',builtIn:true};
+  Object.defineProperty(t,'url',{get(){return this.held||this.src;}});
+  return t;
+ }
+ function holdBuiltIns(list){
+  for(const t of list)fetch(t.src).then(r=>r.ok?r.blob():null).then(blob=>{if(blob&&tracks.includes(t))t.held=URL.createObjectURL(blob);}).catch(()=>{});
+ }
  async function restoreSongs(){
   const saved=readPrefs();
   if(typeof saved.volume==='number'&&saved.volume>=0&&saved.volume<=1){audio.volume=saved.volume;volume.value=String(saved.volume);}
   if(typeof saved.repeat==='boolean')repeat=saved.repeat;
   let rows=[];
   try{rows=await songStore('readonly',s=>s.getAll())||[];}catch{rows=[];}
-  const order=Array.isArray(saved.order)?saved.order:[], place=k=>{const i=order.indexOf(k);return i<0?1e9:i;};
-  rows.sort((a,b)=>place(a.key)-place(b.key)||(a.added||0)-(b.added||0));
-  const kept=[];
+  rows.sort((a,b)=>(a.added||0)-(b.added||0));
+  const builtIns=BUILT_IN.map(builtInTrack), kept=[];
   for(const r of rows){
-   if(!r||!r.data||tracks.some(t=>t.key===r.key))continue;
+   if(!r||!r.data)continue;
+   if(BUILT_IN.some(b=>b.size===r.data.byteLength)){forgetSong(r);continue;}   // the same song is built in now: drop the saved copy
+   if(tracks.some(t=>t.key===r.key))continue;
    kept.push({key:r.key,title:r.title,url:URL.createObjectURL(new Blob([r.data],{type:r.type||'audio/mpeg'}))});
   }
-  tracks=kept.concat(tracks);
+  const order=Array.isArray(saved.order)?saved.order:[];
+  const all=builtIns.concat(kept).map((t,i)=>{const at=order.indexOf(t.key);return {t,at:at>=0?at:t.builtIn?i-1000:1e6+i};}).sort((a,b)=>a.at-b.at).map(x=>x.t);
+  tracks=all.concat(tracks);
   if(tracks.length&&!active)cue(tracks[0]);else{render();drawQueue();}
+  holdBuiltIns(builtIns);
  }
  async function addFiles(files){
   const incoming=Array.from(files), wasEmpty=!tracks.length;
   const accepted=incoming.filter(f=>f.size>0&&(/^audio\//i.test(f.type)||/\.(mp3|wav|m4a|aac|ogg|flac|opus|aiff?)$/i.test(f.name)));
-  let unread=0;
+  let unread=0, already=0;
   for(const f of accepted){
    const key=f.name+'|'+f.size+'|'+f.lastModified;
-   if(tracks.some(t=>t.key===key))continue;
+   if(tracks.some(t=>t.key===key)){already++;continue;}
+   if(BUILT_IN.some(b=>b.size===f.size)){already++;continue;}
    let data;
    try{data=await f.arrayBuffer();}catch{unread++;continue;}
    if(tracks.some(t=>t.key===key))continue;
@@ -386,7 +402,7 @@ input[type=range]:disabled{cursor:default;opacity:.45}
   }
   savePrefs();
   if(wasEmpty&&tracks.length&&!active)cue(tracks[0]);else{render();drawQueue();}
-  tell(unread?'A file could not be read. Check it still exists, then add it again.':!accepted.length?'Choose an MP3 or another audio file.':accepted.length<incoming.length?'Some files weren’t audio and were skipped.':'');
+  tell(unread?'A file could not be read. Check it still exists, then add it again.':!accepted.length?'Choose an MP3 or another audio file.':accepted.length<incoming.length?'Some files weren’t audio and were skipped.':already&&already===accepted.length?'Already in the playlist.':'');
  }
  function move(t,delta){
   const i=tracks.indexOf(t),target=i+delta;if(i<0||target<0||target>=tracks.length)return;
@@ -395,7 +411,7 @@ input[type=range]:disabled{cursor:default;opacity:.45}
  }
  function remove(t){
   const i=tracks.indexOf(t);if(i<0)return;
-  const wasPlaying=!audio.paused;tracks.splice(i,1);forgetSong(t);savePrefs();
+  const wasPlaying=!audio.paused;tracks.splice(i,1);if(!t.builtIn)forgetSong(t);savePrefs();
   if(active===t)cue(tracks[Math.min(i,tracks.length-1)]||null,wasPlaying);
   else {render();drawQueue();}
   URL.revokeObjectURL(t.url);
